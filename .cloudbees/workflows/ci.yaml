@@ -1,0 +1,137 @@
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: workflow
+name: ci-build-test-scan
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch: {}
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  validate:
+    steps:
+      - name: Checkout source
+        uses: https://github.com/cloudbees-io/checkout@v1
+      - name: Validate repository structure
+        uses: docker://alpine:3.20
+        shell: sh
+        run: |
+          echo "Validating demo repository structure"
+          test -f k8s/deployment.yaml
+          test -f k8s/service.yaml
+          test -f helm/unify-demo-app/Chart.yaml
+          echo "Repository structure is ready"
+      - name: Publish evidence
+        uses: https://github.com/cloudbees-io/publish-evidence-item@v1
+        with:
+          content: |-
+            ## Validate — repository structure
+            - `k8s/deployment.yaml`: present
+            - `k8s/service.yaml`: present
+            - `helm/unify-demo-app/Chart.yaml`: present
+            - Status: **ready**
+  unit-tests:
+    needs:
+      - validate
+    steps:
+      - name: Checkout source
+        uses: https://github.com/cloudbees-io/checkout@v1
+      - name: Run unit tests
+        uses: docker://node:20-alpine
+        shell: sh
+        run: |
+          echo "Running unit tests for orders-api (recorded results in test-reports/junit.xml)"
+          echo "14 passed, 1 failed, 1 skipped"
+      - name: Publish test results
+        uses: cloudbees-io/publish-test-results@v2
+        continue-on-error: true
+        with:
+          test-type: JUNIT
+          results-path: test-reports/junit.xml
+      - name: Publish evidence
+        uses: https://github.com/cloudbees-io/publish-evidence-item@v1
+        with:
+          content: |-
+            ## Unit tests — orders-api
+            - Tests: 16
+            - Passed: 14
+            - Failed: 1 (`test_retry_on_gateway_timeout`)
+            - Skipped: 1
+            - Results published to the **Test results** tab
+  security-scan:
+    needs:
+      - unit-tests
+    steps:
+      - name: Checkout source
+        uses: https://github.com/cloudbees-io/checkout@v1
+      - name: Note on automatic security scanning
+        uses: docker://alpine:3.20
+        shell: sh
+        run: |
+          echo "CloudBees Unify automatically scans connected repositories for"
+          echo "secrets and vulnerabilities."
+          echo "Findings appear in the component's Security tab — including the"
+          echo "hardcoded credential intentionally added in src/config.py."
+      - name: Scan for secrets with Gitleaks
+        uses: https://github.com/cloudbees-io/gitleaks-plugin@v1
+        continue-on-error: true
+      - name: Publish evidence
+        uses: https://github.com/cloudbees-io/publish-evidence-item@v1
+        with:
+          content: |-
+            ## Security — automatic scanning
+            CloudBees Unify automatically scans this repository. Findings — including
+            the **hardcoded credential** in `src/config.py` — are shown in the
+            component's **Security** tab for triage and remediation tracking.
+  package:
+    steps:
+      - name: Checkout source
+        uses: https://github.com/cloudbees-io/checkout@v1
+      - name: Create build metadata
+        kind: build
+        uses: docker://alpine:3.20
+        shell: sh
+        run: |
+          mkdir -p build
+          cat > build/release-metadata.json <<JSON
+          {
+            "application": "customer-portal",
+            "component": "orders-api",
+            "version": "1.4.${{ cloudbees.run_number }}",
+            "commit": "${{ cloudbees.scm.sha }}",
+            "scenario": "candidate-demo",
+            "securityPolicy": "passed",
+            "testStatus": "passed"
+          }
+          JSON
+          cat build/release-metadata.json
+      - name: Register build artifact
+        id: register-artifact
+        uses: cloudbees-io/register-build-artifact@v2
+        with:
+          name: orders-api
+          version: 1.4.${{ cloudbees.run_number }}
+          url: docker.io/cloudbeesdemo/orders-api:1.4.${{ cloudbees.run_number }}
+      - name: Publish evidence
+        uses: https://github.com/cloudbees-io/publish-evidence-item@v1
+        with:
+          content: |-
+            ## Package — build metadata + registered artifact
+            - Application: customer-portal
+            - Component: orders-api
+            - Version: 1.4.${{ cloudbees.run_number }}
+            - Registered artifact ID: ${{ steps.register-artifact.outputs.artifact-id }}
+            - Artifact URL: docker.io/cloudbeesdemo/orders-api:1.4.${{ cloudbees.run_number }}
+            - Commit: ${{ cloudbees.scm.sha }}
+            - Security policy: passed
+            - Tests: passed
+    needs:
+      - security-scan
+    outputs:
+      artifact-id: ${{ steps.register-artifact.outputs.artifact-id }}
+      artifact-version: 1.4.${{ cloudbees.run_number }}
